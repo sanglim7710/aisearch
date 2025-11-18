@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini API (Google Grounding) 데모</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+        }
+        .container {
+            max-width: 800px;
+            min-height: 100vh;
+        }
+        .card {
+            background-color: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+            padding: 24px;
+        }
+        .citation {
+            font-size: 0.85rem;
+            color: #4b5563;
+            margin-top: 4px;
+            display: block;
+        }
+        /* 로딩 애니메이션 */
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #4f46e5;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="p-4 flex justify-center">
+
+    <div class="container my-8">
+        <h1 class="text-3xl font-bold text-center text-gray-800 mb-8">
+            Gemini API: 실시간 검색 (Google Grounding)
+        </h1>
+
+        <!-- 입력 섹션 -->
+        <div class="card mb-8">
+            <h2 class="text-xl font-semibold mb-4 text-indigo-600">질문 입력</h2>
+            <textarea id="userInput" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 mb-4 h-24 resize-none" placeholder="실시간 정보가 필요한 질문을 입력하세요. 예: '오늘 환율은 얼마인가요?' 또는 '2025년 월드 시리즈 우승팀은?'"></textarea>
+            
+            <div class="flex items-center space-x-4">
+                <button id="submitButton" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-6 rounded-lg transition duration-150 flex items-center justify-center disabled:opacity-50">
+                    <span id="buttonText">정보 검색하기</span>
+                    <div id="loadingSpinner" class="loader hidden ml-2"></div>
+                </button>
+                <p class="text-sm text-gray-500 italic">
+                    (Gemini-2.5-flash 모델과 Google Search Tool 사용)
+                </p>
+            </div>
+            
+        </div>
+
+        <!-- 결과 섹션 -->
+        <div class="card">
+            <h2 class="text-xl font-semibold mb-4 text-indigo-600">검색 결과</h2>
+            <div id="responseOutput" class="min-h-[100px] p-3 bg-gray-50 border border-gray-200 rounded-lg whitespace-pre-wrap">
+                검색 결과를 기다리는 중...
+            </div>
+
+            <!-- 인용 섹션 -->
+            <div id="citationArea" class="mt-4 border-t border-gray-200 pt-4 hidden">
+                <h3 class="text-base font-semibold mb-2 text-gray-700">인용된 출처 (Grounding Sources)</h3>
+                <div id="sourcesList" class="space-y-2">
+                    <!-- 인용 목록이 여기에 추가됩니다. -->
+                </div>
+            </div>
+            
+            <div id="errorDisplay" class="hidden mt-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg">
+                <strong>오류 발생:</strong> <span id="errorText"></span>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // API 설정 (Canvas 환경에서 __initial_auth_token이 제공되지 않으므로, API Key를 사용합니다.)
+        // Canvas 환경에서 자동으로 API 키가 주입되므로, 빈 문자열로 유지합니다.
+        const API_KEY = "AIzaSyCxMBiN-HRCxchKscv0fx_QYmR9myafrOU"; 
+        const MODEL_NAME = "gemini-2.5-flash-preview-09-2025";
+        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${API_KEY}`;
+
+        // DOM 요소
+        const userInput = document.getElementById('userInput');
+        const submitButton = document.getElementById('submitButton');
+        const buttonText = document.getElementById('buttonText');
+        const loadingSpinner = document.getElementById('loadingSpinner');
+        const responseOutput = document.getElementById('responseOutput');
+        const citationArea = document.getElementById('citationArea');
+        const sourcesList = document.getElementById('sourcesList');
+        const errorDisplay = document.getElementById('errorDisplay');
+        const errorText = document.getElementById('errorText');
+
+        // 상태 관리
+        let isProcessing = false;
+
+        /**
+         * 지수 백오프를 사용하여 API 호출을 시도합니다.
+         * @param {object} payload - API 요청 페이로드
+         * @param {number} maxRetries - 최대 재시도 횟수
+         * @param {number} delay - 초기 지연 시간 (밀리초)
+         * @returns {Promise<object>} API 응답 JSON
+         */
+        async function fetchWithBackoff(payload, maxRetries = 5, delay = 1000) {
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(API_URL, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (response.ok) {
+                        return await response.json();
+                    } 
+                    
+                    // 429 (Rate Limit) 또는 5xx (Server Error)일 경우 재시도
+                    if (response.status === 429 || response.status >= 500) {
+                        if (i < maxRetries - 1) {
+                            await new Promise(resolve => setTimeout(resolve, delay * (2 ** i)));
+                            continue; // 다음 루프로 이동하여 재시도
+                        }
+                    }
+                    
+                    // 기타 오류는 즉시 처리
+                    const errorJson = await response.json();
+                    throw new Error(`API 요청 실패 (HTTP ${response.status}): ${JSON.stringify(errorJson)}`);
+
+                } catch (error) {
+                    // 네트워크 오류 또는 JSON 파싱 오류 처리
+                    if (i === maxRetries - 1) {
+                        throw new Error(`API 호출 중 최대 재시도 횟수 초과: ${error.message}`);
+                    }
+                    // 다음 재시도를 위해 대기
+                    await new Promise(resolve => setTimeout(resolve, delay * (2 ** i)));
+                }
+            }
+        }
+
+
+        /**
+         * Gemini API를 호출하여 답변과 인용을 가져옵니다.
+         */
+        async function getGroundingResponse(query) {
+            // 시스템 명령어: 답변 방식을 안내
+            const systemPrompt = "당신은 Google Search Grounding 도구를 사용하여 질문에 대한 최신 정보를 제공하는 친절한 AI 어시스턴트입니다. 항상 실시간 검색을 통해 얻은 정보를 바탕으로 답변해주세요. 답변은 한국어로 간결하게 요약되어야 합니다.";
+
+            const payload = {
+                contents: [{ parts: [{ text: query }] }],
+                
+                // Google Search Grounding 도구 활성화 (실시간 검색)
+                tools: [{ "google_search": {} }], 
+                
+                systemInstruction: {
+                    parts: [{ text: systemPrompt }]
+                },
+            };
+
+            const result = await fetchWithBackoff(payload);
+            
+            const candidate = result.candidates?.[0];
+            
+            if (candidate && candidate.content?.parts?.[0]?.text) {
+                const text = candidate.content.parts[0].text;
+                let sources = [];
+                
+                // Grounding 소스 추출
+                const groundingMetadata = candidate.groundingMetadata;
+                if (groundingMetadata && groundingMetadata.groundingAttributions) {
+                    sources = groundingMetadata.groundingAttributions
+                        .map(attribution => ({
+                            uri: attribution.web?.uri,
+                            title: attribution.web?.title,
+                        }))
+                        .filter(source => source.uri && source.title); // 유효한 소스만 필터링
+                }
+
+                return { text, sources };
+            } else {
+                throw new Error("Gemini로부터 유효한 응답을 받지 못했습니다. (후보/파트/텍스트 누락)");
+            }
+        }
+
+        /**
+         * UI 상태를 업데이트합니다.
+         */
+        function updateUIState(loading, error = null) {
+            isProcessing = loading;
+            submitButton.disabled = loading;
+            userInput.disabled = loading;
+            
+            buttonText.textContent = loading ? "검색 중..." : "정보 검색하기";
+            loadingSpinner.classList.toggle('hidden', !loading);
+
+            errorDisplay.classList.add('hidden');
+            if (error) {
+                errorText.textContent = error;
+                errorDisplay.classList.remove('hidden');
+            }
+        }
+
+        /**
+         * 결과를 UI에 표시합니다.
+         */
+        function displayResults(text, sources) {
+            responseOutput.textContent = text;
+            sourcesList.innerHTML = ''; // 기존 인용 목록 초기화
+            citationArea.classList.add('hidden');
+
+            if (sources && sources.length > 0) {
+                citationArea.classList.remove('hidden');
+                
+                sources.forEach((source, index) => {
+                    const li = document.createElement('li');
+                    li.innerHTML = `
+                        <a href="${source.uri}" target="_blank" class="text-indigo-600 hover:text-indigo-800 break-words underline">
+                            [${index + 1}] ${source.title || source.uri}
+                        </a>
+                    `;
+                    sourcesList.appendChild(li);
+                });
+            }
+        }
+
+
+        // 이벤트 리스너 설정
+        submitButton.addEventListener('click', async () => {
+            if (isProcessing) return;
+
+            const query = userInput.value.trim();
+            if (!query) {
+                updateUIState(false, "질문을 입력해 주세요.");
+                return;
+            }
+
+            // UI 초기화 및 로딩 시작
+            responseOutput.textContent = "검색 결과를 기다리는 중...";
+            citationArea.classList.add('hidden');
+            updateUIState(true);
+
+            try {
+                const { text, sources } = await getGroundingResponse(query);
+                displayResults(text, sources);
+                updateUIState(false);
+            } catch (error) {
+                console.error("실시간 검색 오류:", error);
+                responseOutput.textContent = "오류로 인해 답변을 가져올 수 없었습니다.";
+                updateUIState(false, error.message);
+            }
+        });
+    </script>
+</body>
+</html>
